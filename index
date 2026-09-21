@@ -1,0 +1,1143 @@
+require('dotenv').config();
+
+const fs = require('node:fs');
+const path = require('node:path');
+const {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ChannelType,
+  Client,
+  EmbedBuilder,
+  Events,
+  GatewayIntentBits,
+  ModalBuilder,
+  PermissionFlagsBits,
+  SlashCommandBuilder,
+  StringSelectMenuBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+} = require('discord.js');
+
+const BRAND_COLOR = 0xe74c3c;
+const DATA_DIRECTORY = path.join(__dirname, 'data');
+const DATA_FILE = path.join(DATA_DIRECTORY, 'guilds.json');
+const MANAGED_BY = 'Central de gerenciamento';
+
+const ROLE_DEFINITIONS = [
+  {
+    key: 'founder',
+    name: '👑 | Fundador',
+    color: 0xf1c40f,
+    permissions: [],
+  },
+  {
+    key: 'management',
+    name: '🛡️ | Gerência',
+    color: 0xe74c3c,
+    permissions: [
+      PermissionFlagsBits.ManageGuild,
+      PermissionFlagsBits.ManageChannels,
+      PermissionFlagsBits.ManageMessages,
+      PermissionFlagsBits.KickMembers,
+      PermissionFlagsBits.BanMembers,
+      PermissionFlagsBits.ModerateMembers,
+      PermissionFlagsBits.ViewAuditLog,
+    ],
+  },
+  {
+    key: 'staff',
+    name: '⚖️ | Staff',
+    color: 0x3498db,
+    permissions: [
+      PermissionFlagsBits.ManageMessages,
+      PermissionFlagsBits.ModerateMembers,
+      PermissionFlagsBits.MoveMembers,
+      PermissionFlagsBits.MuteMembers,
+      PermissionFlagsBits.DeafenMembers,
+    ],
+  },
+  {
+    key: 'support',
+    name: '🎫 | Suporte',
+    color: 0x2ecc71,
+    permissions: [PermissionFlagsBits.ManageMessages],
+  },
+  {
+    key: 'member',
+    name: '✅ | Membro',
+    color: 0x95a5a6,
+    permissions: [],
+  },
+];
+
+// Estes cargos não recebem permissões administrativas globais. Eles servem
+// para organização, cor no perfil e controle fino de canais quando necessário.
+const TERRITORY_DEFINITIONS = [
+  { key: 'barreira_do_vasco', name: 'BarreiraDoVasco', color: 0xe74c3c },
+  { key: 'bato', name: 'Bato', color: 0xe67e22 },
+  { key: 'campinho', name: 'Campinho', color: 0xf1c40f },
+  { key: 'chapadao', name: 'Chapadao', color: 0x2ecc71 },
+  { key: 'cpx_do_alemao', name: 'CpxDoAlemao', color: 0x1abc9c },
+  { key: 'cpx_da_penha', name: 'CpxDaPenha', color: 0x3498db },
+  { key: 'cpx_do_18', name: 'CpxDo18', color: 0x9b59b6 },
+  { key: 'fuba', name: 'Fuba', color: 0x8e44ad },
+  { key: 'gardenia', name: 'Gardenia', color: 0xe84393 },
+  { key: 'pedreira', name: 'Pedreira', color: 0xd35400 },
+  { key: 'providencia', name: 'Providencia', color: 0x16a085 },
+  { key: 'serrinha', name: 'Serrinha', color: 0x2980b9 },
+];
+
+const TERRITORY_ROLE_DEFINITIONS = TERRITORY_DEFINITIONS.flatMap((territory) => [
+  {
+    key: `territory_${territory.key}`,
+    name: territory.name,
+    color: territory.color,
+    permissions: [],
+  },
+  {
+    key: `leader_${territory.key}`,
+    name: `👑 | Líder ${territory.name}`,
+    color: territory.color,
+    permissions: [],
+  },
+  {
+    key: `front_${territory.key}`,
+    name: `⚔️ | Frente ${territory.name}`,
+    color: territory.color,
+    permissions: [],
+  },
+  {
+    key: `manager_${territory.key}`,
+    name: `💼 | Gerente ${territory.name}`,
+    color: territory.color,
+    permissions: [],
+  },
+]);
+
+const COMMANDS = [
+  new SlashCommandBuilder()
+    .setName('setup')
+    .setDescription('Cria a estrutura base do servidor.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .setDMPermission(false)
+    .addStringOption((option) =>
+      option
+        .setName('nome')
+        .setDescription('Nome exibido nas mensagens do bot.')
+        .setMaxLength(60),
+    )
+    .addBooleanOption((option) =>
+      option
+        .setName('sincronizar_permissoes')
+        .setDescription('Reaplica permissões nos recursos já criados pelo bot.'),
+    ),
+  new SlashCommandBuilder()
+    .setName('gerenciar')
+    .setDescription('Publica um painel em um canal de texto.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .setDMPermission(false)
+    .addStringOption((option) =>
+      option
+        .setName('painel')
+        .setDescription('Painel que será publicado.')
+        .setRequired(true)
+        .addChoices(
+          { name: 'Tickets', value: 'ticket' },
+          { name: 'Solicitações', value: 'request' },
+          { name: 'Solicitar set', value: 'set_request' },
+          { name: 'Remover set', value: 'set_remove' },
+          { name: 'Boas-vindas', value: 'welcome' },
+        ),
+    )
+    .addChannelOption((option) =>
+      option
+        .setName('canal')
+        .setDescription('Canal de destino (opcional).')
+        .addChannelTypes(ChannelType.GuildText),
+    ),
+].map((command) => command.toJSON());
+
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+function readStore() {
+  try {
+    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+  } catch {
+    return { guilds: {} };
+  }
+}
+
+const store = readStore();
+
+function saveStore() {
+  fs.mkdirSync(DATA_DIRECTORY, { recursive: true });
+  fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2));
+}
+
+function getGuildState(guildId) {
+  store.guilds ??= {};
+  store.guilds[guildId] ??= {
+    roles: {},
+    channels: {},
+    ticketNumber: 0,
+    displayName: null,
+  };
+  return store.guilds[guildId];
+}
+
+function baseEmbed(title, description) {
+  return new EmbedBuilder()
+    .setColor(BRAND_COLOR)
+    .setTitle(title)
+    .setDescription(description)
+    .setFooter({ text: MANAGED_BY })
+    .setTimestamp();
+}
+
+function cleanChannelPart(value) {
+  const normalized = value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+
+  return normalized.slice(0, 24) || 'membro';
+}
+
+async function getMember(interaction) {
+  return interaction.guild.members.fetch(interaction.user.id);
+}
+
+async function canManage(interaction) {
+  if (!interaction.inGuild()) return false;
+  if (interaction.guild.ownerId === interaction.user.id) return true;
+  const member = await getMember(interaction);
+  return member.permissions.has(PermissionFlagsBits.ManageGuild);
+}
+
+async function isTeamMember(interaction) {
+  if (!interaction.inGuild()) return false;
+  if (await canManage(interaction)) return true;
+
+  const member = await getMember(interaction);
+  return member.roles.cache.some((role) =>
+    ['🛡️ | Gerência', '⚖️ | Staff', '🎫 | Suporte'].includes(role.name),
+  );
+}
+
+function botPermissionsMissing(guild) {
+  const me = guild.members.me;
+  if (!me) return ['não foi possível localizar o bot no servidor'];
+
+  const required = [
+    [PermissionFlagsBits.ManageRoles, 'Gerenciar cargos'],
+    [PermissionFlagsBits.ManageChannels, 'Gerenciar canais'],
+    [PermissionFlagsBits.ViewChannel, 'Ver canais'],
+    [PermissionFlagsBits.SendMessages, 'Enviar mensagens'],
+    [PermissionFlagsBits.EmbedLinks, 'Incorporar links'],
+  ];
+
+  return required
+    .filter(([permission]) => !me.permissions.has(permission))
+    .map(([, label]) => label);
+}
+
+async function getTrackedRole(guild, state, key) {
+  const id = state.roles[key];
+  if (!id) return null;
+  return guild.roles.fetch(id).catch(() => null);
+}
+
+async function ensureRole(guild, state, definition, syncPermissions) {
+  let role = await getTrackedRole(guild, state, definition.key);
+  const wasTracked = Boolean(role);
+
+  if (!role) {
+    role = guild.roles.cache.find((candidate) => candidate.name === definition.name) ?? null;
+  }
+
+  if (!role) {
+    role = await guild.roles.create({
+      name: definition.name,
+      color: definition.color,
+      permissions: definition.permissions,
+      mentionable: false,
+      reason: `${MANAGED_BY}: criação de cargo`,
+    });
+  } else if (wasTracked && syncPermissions && role.editable) {
+    await role.edit({
+      color: definition.color,
+      permissions: definition.permissions,
+      mentionable: false,
+      reason: `${MANAGED_BY}: sincronização de permissões`,
+    });
+  }
+
+  state.roles[definition.key] = role.id;
+  return role;
+}
+
+async function getTrackedChannel(guild, state, key, type) {
+  const id = state.channels[key];
+  if (!id) return null;
+  const channel = await guild.channels.fetch(id).catch(() => null);
+  return channel?.type === type ? channel : null;
+}
+
+async function ensureChannel(guild, state, config, syncPermissions) {
+  let channel = await getTrackedChannel(guild, state, config.key, config.type);
+  const wasTracked = Boolean(channel);
+
+  if (!channel) {
+    channel = guild.channels.cache.find(
+      (candidate) =>
+        candidate.type === config.type &&
+        candidate.name === config.name &&
+        (config.parentId ? candidate.parentId === config.parentId : !candidate.parentId),
+    );
+  }
+
+  if (!channel) {
+    channel = await guild.channels.create({
+      name: config.name,
+      type: config.type,
+      parent: config.parentId,
+      permissionOverwrites: config.permissionOverwrites,
+      reason: `${MANAGED_BY}: criação de estrutura`,
+    });
+  } else if (wasTracked) {
+    const changes = {};
+    if (channel.name !== config.name) changes.name = config.name;
+    if (config.parentId && channel.parentId !== config.parentId) changes.parent = config.parentId;
+    if (Object.keys(changes).length) {
+      await channel.edit({ ...changes, reason: `${MANAGED_BY}: atualização de estrutura` });
+    }
+    if (syncPermissions && config.permissionOverwrites) {
+      await channel.permissionOverwrites.set(config.permissionOverwrites, `${MANAGED_BY}: sincronização de permissões`);
+    }
+  }
+
+  state.channels[config.key] = channel.id;
+  return channel;
+}
+
+function teamOverwrites(guild, roles) {
+  return [
+    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    {
+      id: client.user.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.EmbedLinks,
+        PermissionFlagsBits.ManageChannels,
+        PermissionFlagsBits.ManageMessages,
+      ],
+    },
+    {
+      id: roles.management.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+      ],
+    },
+    {
+      id: roles.staff.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+      ],
+    },
+    {
+      id: roles.support.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+      ],
+    },
+  ];
+}
+
+function readonlyOverwrites(guild, roles) {
+  return [
+    {
+      id: guild.roles.everyone.id,
+      deny: [
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.AddReactions,
+        PermissionFlagsBits.CreatePublicThreads,
+        PermissionFlagsBits.CreatePrivateThreads,
+      ],
+    },
+    {
+      id: roles.management.id,
+      allow: [
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.EmbedLinks,
+        PermissionFlagsBits.AttachFiles,
+      ],
+    },
+    {
+      id: roles.staff.id,
+      allow: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks],
+    },
+    {
+      id: client.user.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.EmbedLinks,
+        PermissionFlagsBits.AttachFiles,
+      ],
+    },
+  ];
+}
+
+function territoryOverwrites(guild, roles, territory) {
+  const territoryRoleKeys = [
+    `territory_${territory.key}`,
+    `leader_${territory.key}`,
+    `front_${territory.key}`,
+    `manager_${territory.key}`,
+  ];
+
+  return [
+    ...teamOverwrites(guild, roles),
+    ...territoryRoleKeys.map((key) => ({
+      id: roles[key].id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.EmbedLinks,
+        PermissionFlagsBits.AttachFiles,
+      ],
+    })),
+  ];
+}
+
+async function setupGuild(guild, displayName, syncPermissions) {
+  const state = getGuildState(guild.id);
+  if (displayName) state.displayName = displayName;
+  state.displayName ??= guild.name;
+
+  await guild.roles.fetch();
+  await guild.channels.fetch();
+
+  const roles = {};
+  for (const definition of [...ROLE_DEFINITIONS, ...TERRITORY_ROLE_DEFINITIONS]) {
+    roles[definition.key] = await ensureRole(guild, state, definition, syncPermissions);
+  }
+
+  const information = await ensureChannel(guild, state, {
+    key: 'category_information',
+    name: '⚠️ | BEM-VINDO',
+    type: ChannelType.GuildCategory,
+  }, syncPermissions);
+
+  const community = await ensureChannel(guild, state, {
+    key: 'category_community',
+    name: '🏙️ | QUEBRADA RJ',
+    type: ChannelType.GuildCategory,
+  }, syncPermissions);
+
+  const baques = await ensureChannel(guild, state, {
+    key: 'category_support',
+    name: '🛡️ | BAQUES',
+    type: ChannelType.GuildCategory,
+  }, syncPermissions);
+
+  const reunion = await ensureChannel(guild, state, {
+    key: 'category_reunion',
+    name: '🐱 | REUNIÃO ILEGAL',
+    type: ChannelType.GuildCategory,
+    permissionOverwrites: teamOverwrites(guild, roles),
+  }, syncPermissions);
+
+  const tickets = await ensureChannel(guild, state, {
+    key: 'category_tickets',
+    name: '🔒 | TICKETS',
+    type: ChannelType.GuildCategory,
+    permissionOverwrites: teamOverwrites(guild, roles),
+  }, syncPermissions);
+
+  const team = await ensureChannel(guild, state, {
+    key: 'category_team',
+    name: '🔐 | EQUIPE',
+    type: ChannelType.GuildCategory,
+    permissionOverwrites: teamOverwrites(guild, roles),
+  }, syncPermissions);
+
+  const voice = await ensureChannel(guild, state, {
+    key: 'category_voice',
+    name: '🔊 | VOZ',
+    type: ChannelType.GuildCategory,
+  }, syncPermissions);
+
+  const readonly = readonlyOverwrites(guild, roles);
+  await ensureChannel(guild, state, {
+    key: 'welcome',
+    name: '⚠️・solicitar-set',
+    type: ChannelType.GuildText,
+    parentId: information.id,
+    permissionOverwrites: readonly,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'set_remove',
+    name: '⚠️・remover-set',
+    type: ChannelType.GuildText,
+    parentId: information.id,
+    permissionOverwrites: readonly,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'set_update',
+    name: '⚠️・atualizar-set',
+    type: ChannelType.GuildText,
+    parentId: information.id,
+    permissionOverwrites: readonly,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'request_panel',
+    name: '📌・solicitar-set-staff',
+    type: ChannelType.GuildText,
+    parentId: information.id,
+    permissionOverwrites: readonly,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'chat',
+    name: '💬・chat-geral',
+    type: ChannelType.GuildText,
+    parentId: community.id,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'suggestions',
+    name: '❓・sugestão',
+    type: ChannelType.GuildText,
+    parentId: community.id,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'ticket_panel',
+    name: '📩・ticket',
+    type: ChannelType.GuildText,
+    parentId: community.id,
+    permissionOverwrites: readonly,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'rules',
+    name: '📕・regras',
+    type: ChannelType.GuildText,
+    parentId: community.id,
+    permissionOverwrites: readonly,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'announcements',
+    name: '🚨・avisos',
+    type: ChannelType.GuildText,
+    parentId: community.id,
+    permissionOverwrites: readonly,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'location',
+    name: '📍・localização-matuto',
+    type: ChannelType.GuildText,
+    parentId: community.id,
+    permissionOverwrites: readonly,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'pd_permanent',
+    name: '🧱・pd-permanente',
+    type: ChannelType.GuildText,
+    parentId: community.id,
+    permissionOverwrites: readonly,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'polls',
+    name: '📊・enquetes',
+    type: ChannelType.GuildText,
+    parentId: community.id,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'baque_done',
+    name: '🛡️・baqueou',
+    type: ChannelType.GuildText,
+    parentId: baques.id,
+    permissionOverwrites: readonly,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'baque_returned',
+    name: '📥・devolveu-baque',
+    type: ChannelType.GuildText,
+    parentId: baques.id,
+    permissionOverwrites: readonly,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'baque_cancelled',
+    name: '⛔・baque-cancelado',
+    type: ChannelType.GuildText,
+    parentId: baques.id,
+    permissionOverwrites: readonly,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'reunion_voice',
+    name: '🔒・reunião-ilegal',
+    type: ChannelType.GuildVoice,
+    parentId: reunion.id,
+    permissionOverwrites: teamOverwrites(guild, roles),
+  }, syncPermissions);
+
+  for (const territory of TERRITORY_DEFINITIONS) {
+    const access = territoryOverwrites(guild, roles, territory);
+    const category = await ensureChannel(guild, state, {
+      key: `category_territory_${territory.key}`,
+      name: `📍 | ${territory.name.toUpperCase()}`,
+      type: ChannelType.GuildCategory,
+      permissionOverwrites: access,
+    }, syncPermissions);
+
+    const channels = [
+      ['announcements', '📢・avisos'],
+      ['leadership_chat', '💬・chat-liderança'],
+      ['suggestions', '💡・sugestões'],
+      ['clothing', '👕・roupas'],
+    ];
+
+    for (const [channelKey, channelName] of channels) {
+      await ensureChannel(guild, state, {
+        key: `territory_${territory.key}_${channelKey}`,
+        name: channelName,
+        type: ChannelType.GuildText,
+        parentId: category.id,
+        permissionOverwrites: access,
+      }, syncPermissions);
+    }
+  }
+
+  await ensureChannel(guild, state, {
+    key: 'management',
+    name: '🛠️・gestão',
+    type: ChannelType.GuildText,
+    parentId: team.id,
+    permissionOverwrites: teamOverwrites(guild, roles),
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'logs',
+    name: '📋・logs',
+    type: ChannelType.GuildText,
+    parentId: team.id,
+    permissionOverwrites: teamOverwrites(guild, roles),
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'voice_general',
+    name: '🔊・geral',
+    type: ChannelType.GuildVoice,
+    parentId: voice.id,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'voice_room_1',
+    name: '🎮・sala-1',
+    type: ChannelType.GuildVoice,
+    parentId: voice.id,
+  }, syncPermissions);
+  await ensureChannel(guild, state, {
+    key: 'voice_afk',
+    name: '💤・ausente',
+    type: ChannelType.GuildVoice,
+    parentId: voice.id,
+    permissionOverwrites: [
+      {
+        id: guild.roles.everyone.id,
+        deny: [PermissionFlagsBits.Speak],
+      },
+    ],
+  }, syncPermissions);
+
+  saveStore();
+  return { state, roles, tickets };
+}
+
+async function getManagedTextChannel(guild, state, key) {
+  const id = state.channels[key];
+  if (!id) return null;
+  const channel = await guild.channels.fetch(id).catch(() => null);
+  return channel?.type === ChannelType.GuildText ? channel : null;
+}
+
+function ticketOwnerId(channel) {
+  return channel?.topic?.match(/owner:(\d{17,20})/)?.[1] ?? null;
+}
+
+async function createPrivateTicket(interaction, options) {
+  const guild = interaction.guild;
+  const state = getGuildState(guild.id);
+  const missing = botPermissionsMissing(guild);
+  if (missing.length) {
+    throw new Error(`O bot não possui: ${missing.join(', ')}.`);
+  }
+
+  await guild.channels.fetch();
+
+  const ticketsCategory = await guild.channels.fetch(state.channels.category_tickets).catch(() => null);
+  if (!ticketsCategory || ticketsCategory.type !== ChannelType.GuildCategory) {
+    throw new Error('A categoria de tickets não existe. Execute `/setup` primeiro.');
+  }
+
+  const existing = guild.channels.cache.find(
+    (channel) => channel.type === ChannelType.GuildText && ticketOwnerId(channel) === interaction.user.id,
+  );
+  if (existing) {
+    throw new Error(`Você já possui um atendimento aberto: ${existing}.`);
+  }
+
+  await guild.roles.fetch();
+  const management = await getTrackedRole(guild, state, 'management');
+  const staff = await getTrackedRole(guild, state, 'staff');
+  const support = await getTrackedRole(guild, state, 'support');
+  if (!management || !staff || !support) {
+    throw new Error('Os cargos da equipe não foram encontrados. Execute `/setup` novamente.');
+  }
+
+  state.ticketNumber = Number(state.ticketNumber || 0) + 1;
+  saveStore();
+
+  const number = String(state.ticketNumber).padStart(4, '0');
+  const username = cleanChannelPart(interaction.user.username);
+  const channel = await guild.channels.create({
+    name: `${options.kind === 'Solicitação' ? 'solicitacao' : 'ticket'}-${number}-${username}`,
+    type: ChannelType.GuildText,
+    parent: ticketsCategory.id,
+    topic: `owner:${interaction.user.id} | type:${options.kind}`,
+    permissionOverwrites: [
+      { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+      {
+        id: interaction.user.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.EmbedLinks,
+          PermissionFlagsBits.AttachFiles,
+        ],
+      },
+      ...[management, staff, support].map((role) => ({
+        id: role.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.ManageMessages,
+        ],
+      })),
+      {
+        id: client.user.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.ManageChannels,
+          PermissionFlagsBits.ManageMessages,
+        ],
+      },
+    ],
+    reason: `${MANAGED_BY}: ${options.kind.toLowerCase()} de ${interaction.user.tag}`,
+  });
+
+  const details = options.details
+    ? `\n\n**Dados enviados**\n${options.details}`
+    : '\n\nExplique abaixo como a equipe pode ajudar.';
+  const controls = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('ticket:claim')
+      .setLabel('Assumir')
+      .setEmoji('🙋')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId('ticket:close')
+      .setLabel('Fechar')
+      .setEmoji('🔒')
+      .setStyle(ButtonStyle.Danger),
+  );
+
+  await channel.send({
+    content: `${interaction.user} <@&${support.id}>`,
+    embeds: [
+      baseEmbed(`${options.kind} #${number}`, `Olá, ${interaction.user}. A equipe foi avisada.${details}`),
+    ],
+    components: [controls],
+  });
+
+  return channel;
+}
+
+function ticketPanel(displayName) {
+  return {
+    embeds: [
+      baseEmbed(
+        '🎫 Atendimento',
+        `Precisa de ajuda em **${displayName}**? Clique no botão abaixo para abrir um canal privado com a equipe.\n\nUse um atendimento por vez e explique seu caso com clareza.`,
+      ),
+    ],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('ticket:create')
+          .setLabel('Abrir ticket')
+          .setEmoji('🎟️')
+          .setStyle(ButtonStyle.Danger),
+      ),
+    ],
+  };
+}
+
+function requestPanel(displayName) {
+  return {
+    embeds: [
+      baseEmbed(
+        '📝 Enviar solicitação',
+        `Envie sua solicitação para a equipe de **${displayName}**. O formulário abre um canal privado para análise.`,
+      ),
+    ],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('request:create')
+          .setLabel('Fazer solicitação')
+          .setEmoji('📝')
+          .setStyle(ButtonStyle.Primary),
+      ),
+    ],
+  };
+}
+
+function setPanel(action, displayName) {
+  const requesting = action === 'request';
+  const title = requesting ? '👥 PEDIR SET' : '👥 REMOVER SET';
+  const description = requesting
+    ? `Preencha o formulário abaixo para solicitar seu set em uma localidade de **${displayName}**.\nApós o envio, a equipe irá analisar e aprovar ou recusar sua solicitação.`
+    : 'Preencha o formulário abaixo para solicitar a remoção de seu set. Após o envio, a equipe irá analisar a solicitação.';
+
+  return {
+    embeds: [baseEmbed(title, description)],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`set:${action}:start`)
+          .setLabel(requesting ? 'Pedir set' : 'Remover set')
+          .setEmoji('👥')
+          .setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+  };
+}
+
+function territorySelect(action) {
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`set:${action}:select`)
+      .setPlaceholder('Selecione a localidade')
+      .addOptions(
+        TERRITORY_DEFINITIONS.map((territory) => ({
+          label: territory.name,
+          value: territory.key,
+          description: requestingDescription(action, territory.name),
+        })),
+      ),
+  );
+}
+
+function requestingDescription(action, territoryName) {
+  return action === 'request'
+    ? `Solicitar set: ${territoryName}`
+    : `Remover set: ${territoryName}`;
+}
+
+function welcomePanel(displayName) {
+  return {
+    embeds: [
+      baseEmbed(
+        `Bem-vindo(a) a ${displayName}!`,
+        'Leia as regras, escolha sua identificação e use os canais com respeito. Caso precise de ajuda, abra um ticket na categoria de suporte.',
+      ),
+    ],
+  };
+}
+
+function requestModal() {
+  return new ModalBuilder()
+    .setCustomId('request:modal')
+    .setTitle('Enviar solicitação')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('request_subject')
+          .setLabel('Assunto')
+          .setPlaceholder('Ex.: Dúvida sobre acesso')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(80),
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('request_description')
+          .setLabel('Descreva sua solicitação')
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMaxLength(1000),
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('request_reference')
+          .setLabel('Referência ou contato (opcional)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setMaxLength(120),
+      ),
+    );
+}
+
+async function replyError(interaction, message) {
+  const payload = { content: `❌ ${message}`, ephemeral: true };
+  if (interaction.deferred) return interaction.editReply(payload);
+  if (interaction.replied) return interaction.followUp(payload);
+  return interaction.reply(payload);
+}
+
+async function handleSetup(interaction) {
+  if (!(await canManage(interaction))) {
+    return replyError(interaction, 'Você precisa da permissão **Gerenciar servidor** para usar este comando.');
+  }
+
+  const missing = botPermissionsMissing(interaction.guild);
+  if (missing.length) {
+    return replyError(interaction, `Conceda ao bot as permissões: **${missing.join(', ')}** e tente novamente.`);
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  const displayName = interaction.options.getString('nome')?.trim();
+  const syncPermissions = interaction.options.getBoolean('sincronizar_permissoes') ?? false;
+  const result = await setupGuild(interaction.guild, displayName, syncPermissions);
+
+  await interaction.editReply({
+    embeds: [
+      baseEmbed(
+        '✅ Estrutura pronta',
+        [
+          `Foram preparados **${ROLE_DEFINITIONS.length + TERRITORY_ROLE_DEFINITIONS.length} cargos**, categorias, canais de texto e salas de voz para **${result.state.displayName}**.`,
+          'Use `/gerenciar painel:Tickets` e `/gerenciar painel:Solicitações` para publicar os painéis.',
+          syncPermissions
+            ? 'As permissões dos recursos já registrados pelo bot também foram sincronizadas.'
+            : 'Canais e cargos já existentes fora do controle do bot não foram modificados.',
+        ].join('\n\n'),
+      ),
+    ],
+  });
+}
+
+async function handleManage(interaction) {
+  if (!(await canManage(interaction))) {
+    return replyError(interaction, 'Você precisa da permissão **Gerenciar servidor** para usar este comando.');
+  }
+
+  const state = getGuildState(interaction.guild.id);
+  const panel = interaction.options.getString('painel', true);
+  const chosenChannel = interaction.options.getChannel('canal');
+  const defaults = {
+    ticket: 'ticket_panel',
+    request: 'request_panel',
+    set_request: 'welcome',
+    set_remove: 'set_remove',
+    welcome: 'welcome',
+  };
+  const target = chosenChannel ?? await getManagedTextChannel(interaction.guild, state, defaults[panel]);
+
+  if (!target || target.type !== ChannelType.GuildText) {
+    return replyError(interaction, 'Canal não encontrado. Execute `/setup` ou informe um canal de texto em `canal`.');
+  }
+
+  const me = interaction.guild.members.me;
+  const channelPermissions = target.permissionsFor(me);
+  if (!channelPermissions?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) {
+    return replyError(interaction, `Não consigo enviar embeds no canal ${target}.`);
+  }
+
+  const displayName = state.displayName ?? interaction.guild.name;
+  const message = panel === 'ticket'
+    ? ticketPanel(displayName)
+    : panel === 'request'
+      ? requestPanel(displayName)
+      : panel === 'set_request'
+        ? setPanel('request', displayName)
+        : panel === 'set_remove'
+          ? setPanel('remove', displayName)
+      : welcomePanel(displayName);
+
+  await target.send(message);
+  await interaction.reply({ content: `✅ Painel publicado em ${target}.`, ephemeral: true });
+}
+
+async function handleButton(interaction) {
+  if (interaction.customId === 'set:request:start' || interaction.customId === 'set:remove:start') {
+    const action = interaction.customId === 'set:request:start' ? 'request' : 'remove';
+    return interaction.reply({
+      content: action === 'request'
+        ? 'Selecione a localidade para a qual deseja pedir set.'
+        : 'Selecione a localidade da qual deseja remover o set.',
+      ephemeral: true,
+      components: [territorySelect(action)],
+    });
+  }
+
+  if (interaction.customId === 'ticket:create') {
+    await interaction.deferReply({ ephemeral: true });
+    const channel = await createPrivateTicket(interaction, { kind: 'Ticket' });
+    return interaction.editReply(`✅ Seu ticket foi criado: ${channel}`);
+  }
+
+  if (interaction.customId === 'request:create') {
+    return interaction.showModal(requestModal());
+  }
+
+  if (interaction.customId === 'ticket:claim') {
+    if (!(await isTeamMember(interaction))) {
+      return replyError(interaction, 'Somente a equipe pode assumir este atendimento.');
+    }
+
+    await interaction.channel.send({
+      embeds: [baseEmbed('🙋 Atendimento assumido', `${interaction.user} assumiu este atendimento.`)],
+    });
+    return interaction.reply({ content: '✅ Você assumiu este atendimento.', ephemeral: true });
+  }
+
+  if (interaction.customId === 'ticket:close') {
+    const owner = ticketOwnerId(interaction.channel);
+    if (owner !== interaction.user.id && !(await isTeamMember(interaction))) {
+      return replyError(interaction, 'Apenas quem abriu o atendimento ou a equipe pode fechá-lo.');
+    }
+
+    return interaction.reply({
+      content: 'Deseja realmente fechar este atendimento? Esta ação remove o canal.',
+      ephemeral: true,
+      components: [
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId('ticket:confirm-close')
+            .setLabel('Sim, fechar')
+            .setStyle(ButtonStyle.Danger),
+          new ButtonBuilder()
+            .setCustomId('ticket:cancel-close')
+            .setLabel('Cancelar')
+            .setStyle(ButtonStyle.Secondary),
+        ),
+      ],
+    });
+  }
+
+  if (interaction.customId === 'ticket:cancel-close') {
+    return interaction.update({ content: 'Fechamento cancelado.', components: [] });
+  }
+
+  if (interaction.customId === 'ticket:confirm-close') {
+    const owner = ticketOwnerId(interaction.channel);
+    if (owner !== interaction.user.id && !(await isTeamMember(interaction))) {
+      return replyError(interaction, 'Você não pode fechar este atendimento.');
+    }
+
+    await interaction.update({ content: '⏳ Fechando atendimento…', components: [] });
+    await interaction.channel.delete(`${MANAGED_BY}: fechado por ${interaction.user.tag}`);
+  }
+}
+
+async function handleTerritorySelect(interaction) {
+  const action = interaction.customId === 'set:request:select' ? 'request' : 'remove';
+  const territory = TERRITORY_DEFINITIONS.find((candidate) => candidate.key === interaction.values[0]);
+  if (!territory) {
+    return replyError(interaction, 'Localidade inválida. Selecione uma opção do painel.');
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  const kind = action === 'request' ? 'Solicitação de Set' : 'Remoção de Set';
+  const detailLabel = action === 'request' ? 'Set solicitado' : 'Set a remover';
+  const channel = await createPrivateTicket(interaction, {
+    kind,
+    details: `**${detailLabel}:** ${territory.name}`,
+  });
+
+  await interaction.editReply(
+    action === 'request'
+      ? `✅ Sua solicitação para **${territory.name}** foi enviada em ${channel}.`
+      : `✅ Seu pedido de remoção de **${territory.name}** foi enviado em ${channel}.`,
+  );
+}
+
+async function handleModal(interaction) {
+  if (interaction.customId !== 'request:modal') return;
+
+  await interaction.deferReply({ ephemeral: true });
+  const subject = interaction.fields.getTextInputValue('request_subject');
+  const description = interaction.fields.getTextInputValue('request_description');
+  const reference = interaction.fields.getTextInputValue('request_reference');
+  const details = [
+    `**Assunto:** ${subject}`,
+    `**Descrição:** ${description}`,
+    reference ? `**Referência:** ${reference}` : null,
+  ].filter(Boolean).join('\n');
+
+  const channel = await createPrivateTicket(interaction, {
+    kind: 'Solicitação',
+    details,
+  });
+  await interaction.editReply(`✅ Sua solicitação foi enviada em ${channel}.`);
+}
+
+client.once(Events.ClientReady, async (readyClient) => {
+  console.log(`Conectado como ${readyClient.user.tag}`);
+
+  try {
+    if (process.env.GUILD_ID) {
+      const guild = await readyClient.guilds.fetch(process.env.GUILD_ID);
+      await guild.commands.set(COMMANDS);
+      console.log(`Comandos registrados instantaneamente em ${guild.name}.`);
+    } else {
+      await readyClient.application.commands.set(COMMANDS);
+      console.log('Comandos globais registrados. A propagação pode levar algum tempo.');
+    }
+  } catch (error) {
+    console.error('Não foi possível registrar os comandos:', error);
+  }
+});
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  try {
+    if (interaction.isChatInputCommand()) {
+      if (!interaction.inGuild()) return replyError(interaction, 'Este bot funciona somente em servidores.');
+      if (interaction.commandName === 'setup') return handleSetup(interaction);
+      if (interaction.commandName === 'gerenciar') return handleManage(interaction);
+    }
+
+    if (interaction.isButton()) return handleButton(interaction);
+    if (interaction.isStringSelectMenu()) {
+      if (interaction.customId === 'set:request:select' || interaction.customId === 'set:remove:select') {
+        return handleTerritorySelect(interaction);
+      }
+    }
+    if (interaction.isModalSubmit()) return handleModal(interaction);
+  } catch (error) {
+    console.error('Erro ao processar interação:', error);
+    const message = error instanceof Error ? error.message : 'Ocorreu um erro inesperado.';
+    await replyError(interaction, message);
+  }
+});
+
+if (!process.env.DISCORD_TOKEN) {
+  console.error('DISCORD_TOKEN não encontrado. Configure o arquivo .env usando .env.example.');
+  process.exit(1);
+}
+
+client.login(process.env.DISCORD_TOKEN);
